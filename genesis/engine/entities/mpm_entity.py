@@ -79,7 +79,8 @@ class MPMEntity(ParticleEntity):
             self._material.rho,
             self._particles,
         )
-
+    def get_stress(self):
+        return self.material.stress
     def set_pos(self, f, pos):
         """
         Set particle positions at a specific frame.

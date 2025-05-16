@@ -135,6 +135,13 @@ class MPMSolver(Solver):
         self.particles_render = struct_particle_state_render.field(
             shape=self._batch_shape(self._n_particles), needs_grad=False, layout=ti.Layout.SOA
         )
+        self.particle_stress = ti.types.struct(
+            stress=gs.ti_mat3,
+        ).field(
+            shape=self._batch_shape((self._sim.substeps_local + 1, self._n_particles)),
+            needs_grad=False,
+            layout=ti.Layout.SOA,
+        )
 
     def init_grid_fields(self):
         grid_cell_state = ti.types.struct(
@@ -365,6 +372,8 @@ class MPMSolver(Solver):
                             actu=self.particles[f, i_p, i_b].actu,
                             m_dir=self.particles_info[i_p].muscle_direction,
                         )
+                # ストレスを保存
+                self.particle_stress[f, i_p, i_b].stress = stress
                 stress = (-self.substep_dt * self._p_vol * 4 * self._inv_dx * self._inv_dx) * stress
                 affine = stress + self.particles_info[i_p].mass * self.particles[f, i_p, i_b].C
 
@@ -909,7 +918,7 @@ class MPMSolver(Solver):
         self,
         f: ti.i32,
         pos: ti.types.ndarray(),  # shape [B, n_particles, 3]
-        vel: ti.types.ndarray(),  # shape [B, n_particles, 3]
+        vel: ti.types.ndarray(),  # shape [B, n_particles, 3] # type: ignore
         C: ti.types.ndarray(),  # shape [B, n_particles, 3, 3]
         F: ti.types.ndarray(),  # shape [B, n_particles, 3, 3]
         Jp: ti.types.ndarray(),  # shape [B, n_particles]
@@ -927,6 +936,34 @@ class MPMSolver(Solver):
             # Write Jp, active
             self.particles[f, i_p, i_b].Jp = Jp[i_b, i_p]
             self.particles_ng[f, i_p, i_b].active = active[i_b, i_p]
+
+    @ti.kernel
+    def _kernel_get_stress(
+        self,
+        f: ti.i32, # type: ignore
+        stress: ti.types.ndarray(),  # shape [B, n_particles, 3, 3] # type: ignore
+    ):
+        for i_p, i_b in ti.ndrange(self._n_particles, self._B):
+            for j in ti.static(range(3)):
+                for k in ti.static(range(3)):
+                    stress[i_b, i_p, j, k] = self.particle_stress[f, i_p, i_b].stress[j, k]
+
+    def get_stress(self, f=None):
+        """
+        粒子のストレステンソルを取得します
+        
+        Args:
+            f: フレームインデックス。Noneの場合は現在のフレームを使用
+            
+        Returns:
+            stress: [B, n_particles, 3, 3] 形状のnumpy配列
+        """
+        if f is None:
+            f = self.sim.cur_substep_local
+            
+        stress = torch.zeros((self._B, self._n_particles, 3, 3), dtype=gs.tc_float)
+        self._kernel_get_stress(f, stress)
+        return stress
 
     def get_state(self, f):
         if self.is_active():
